@@ -22,6 +22,14 @@
 
 // <reference types="ZLUX" />
 
+const IFRAME_LOAD_TIMEOUT = 180000; //3 minutes
+
+class ActionTarget {
+  constructor(
+    public readonly wrapper: ApplicationInstanceWrapper,
+    public readonly preexisting: boolean){}
+}
+
 export class RecognizerIndex {
    propertyName:string;
    valueMap:Map<any,RecognitionRule[]> = new Map();
@@ -53,12 +61,21 @@ export class DispatcherConstants implements ZLUX.DispatcherConstants {
   readonly ActionType = ActionType;
 }
 
+class IframeContext {
+  constructor(
+    public readonly timestamp: number,
+    public readonly data: any
+  ){}
+}
+
 export class Dispatcher implements ZLUX.Dispatcher {
+   private pendingIframes: Map<string,IframeContext[]> = new Map();
    private instancesForTypes : Map<string,ApplicationInstanceWrapper[]> = new Map();
-   recognizers:RecognitionRule[] = [];
-   actionsByID :Map<string,Action> = new Map();
-   indexedRecognizers :Map<String,RecognizerIndex> = new Map();
+   private recognizers:RecognitionRule[] = [];
+   private actionsByID :Map<string,Action> = new Map();
+   private indexedRecognizers :Map<String,RecognizerIndex> = new Map();
    launchCallback: any = null;
+   private pluginWatchers: Map<String,Array<ZLUX.PluginWatcher>> = new Map();
    postMessageCallback: any = null;
    public readonly constants:DispatcherConstants = new DispatcherConstants();
    private log:ZLUX.ComponentLogger;
@@ -79,24 +96,35 @@ export class Dispatcher implements ZLUX.Dispatcher {
 
    static dispatcherHeartbeatInterval:number = 60000; /* one minute */
 
+   clear(): void {
+    this.instancesForTypes.clear();
+    this.indexedRecognizers.clear();
+    this.recognizers = [];
+    this.actionsByID.clear();
+   }
+
    runHeartbeat():void {
      let dispatcherHeartbeatFunction = () => {
+     this.log.debug('Recognizers: ', this.recognizers);
      this.log.debug("dispatcher heart beat");
-     this.log.debug("instances for Types = "+this.instancesForTypes.toString());
+     this.log.debug("instances for Types = ", this.instancesForTypes);
+     this.log.debug("indexed recognizers = ", this.indexedRecognizers);
      let keyIterator:Iterator<string> = this.instancesForTypes.keys();
      while (true){
        let iterationValue = keyIterator.next();
        if (iterationValue.done) break;
        let key = iterationValue.value;
        let wrappers:ApplicationInstanceWrapper[]|undefined = this.instancesForTypes.get(key);
-       this.log.debug("disp.heartbeat: key "+JSON.stringify(key)+" val="+wrappers);
+       this.log.debug("disp.heartbeat: key "+JSON.stringify(key)+" val=",wrappers);
        if (wrappers){
          for (let wrapper of (wrappers as ApplicationInstanceWrapper[])){
-           this.log.debug("wrapper="+wrapper);
-           this.postMessageCallback(wrapper.applicationInstanceId,
-            { dispatchType: "echo",
-              dispatchData:  { a: 1 }
-            });
+           this.log.debug("wrapper=",wrapper);
+           if (wrapper.isIframe && this.postMessageCallback) {
+             this.postMessageCallback(wrapper.applicationInstanceId,
+              { dispatchType: "echo",
+                dispatchData:  { a: 1 }
+              });
+           }
          }
        }
       
@@ -107,9 +135,24 @@ export class Dispatcher implements ZLUX.Dispatcher {
     window.setTimeout(dispatcherHeartbeatFunction,Dispatcher.dispatcherHeartbeatInterval);
    }
 
-   deregisterPluginInstance(plugin: ZLUX.Plugin, applicationInstanceId: any):void {
+  iframeLoaded(instanceId: MVDHosting.InstanceId, identifier: string):void {
+    this.log.debug(`Dequeuing iframe data`);
+    if (this.postMessageCallback) {
+      const contexts = this.pendingIframes.get(identifier);
+      if (contexts && contexts.length > 0) {
+        let context = contexts.shift();
+        if (context) {
+          this.log.debug(`Sending postmessage of type launch to ${identifier} instance=${instanceId}`,context.data);
+          this.postMessageCallback(instanceId,{dispatchType: 'launch', dispatchData: {launchMetadata: context.data}});
+        }
+      }
+    }
+   }   
+
+   deregisterPluginInstance(plugin: ZLUX.Plugin, applicationInstanceId: MVDHosting.InstanceId):void {
      this.log.info(`Dispatcher requested to deregister plugin ${plugin} with id ${applicationInstanceId}`);
-     let instancesArray = this.instancesForTypes.get(plugin.getKey());
+     let key = plugin.getKey();
+     let instancesArray = this.instancesForTypes.get(key);
      if (!instancesArray) {
        this.log.warn("Couldn't deregister instance for plugin ${plugin} because no instances were found");
      } else {
@@ -117,6 +160,12 @@ export class Dispatcher implements ZLUX.Dispatcher {
          if (instancesArray[i].applicationInstanceId === applicationInstanceId) {
            instancesArray.splice(i,1);
            this.log.debug(`Deregistered application instance with id ${applicationInstanceId} from plugin ${plugin} successfully`);
+           let watchers = this.pluginWatchers.get(key);
+           if (watchers) {
+             for (let j = 0; j < watchers.length; j++) {
+               watchers[j].instanceRemoved(applicationInstanceId);
+             }
+           }
            return;
          }
        }
@@ -124,7 +173,7 @@ export class Dispatcher implements ZLUX.Dispatcher {
      }
    }
 
-   registerPluginInstance(plugin: ZLUX.Plugin, applicationInstanceId: any, isIframe:boolean): void {
+   registerPluginInstance(plugin: ZLUX.Plugin, applicationInstanceId: MVDHosting.InstanceId, isIframe:boolean, isEmbedded?:boolean): void {
      this.log.info("Registering plugin="+plugin+" id="+applicationInstanceId);
      let instanceWrapper = new ApplicationInstanceWrapper(applicationInstanceId,isIframe);
      let key = plugin.getKey();
@@ -133,6 +182,12 @@ export class Dispatcher implements ZLUX.Dispatcher {
      } else {
        let ids:any[] = (this.instancesForTypes.get(key) as any[]);
        ids.push(instanceWrapper);
+     }
+     let watchers = this.pluginWatchers.get(key);
+     if (watchers) {
+       for (let i = 0; i < watchers.length; i++) {
+         watchers[i].instanceAdded(applicationInstanceId, isEmbedded);
+       }
      }
      // Michael - how to get window manager, IE, how to get interface to look up plugins,
      // or be called on plugin instance lifecycle stuff.
@@ -262,6 +317,33 @@ export class Dispatcher implements ZLUX.Dispatcher {
        }
      }
    }
+
+  registerPluginWatcher(plugin:ZLUX.Plugin, watcher: ZLUX.PluginWatcher) {
+    let key = plugin.getKey();
+    let watchers = this.pluginWatchers.get(key);
+    if (!watchers) {
+      watchers = new Array<ZLUX.PluginWatcher>();
+      this.pluginWatchers.set(key,watchers);
+    }
+    watchers.push(watcher);
+  }
+
+  deregisterPluginWatcher(plugin:ZLUX.Plugin, watcher: ZLUX.PluginWatcher): boolean {
+    let key = plugin.getKey();
+    let watchers = this.pluginWatchers.get(key);
+    if (!watchers) {
+      return false;
+    }
+    else {
+      for (let i = 0; i < watchers.length; i++) {
+        if (watchers[i] == watcher) {
+          watchers.splice(i,1);
+          return true;
+        }
+      }
+      return false;
+    }
+  }
     
 
 /* what will callback be called with */
@@ -392,17 +474,40 @@ export class Dispatcher implements ZLUX.Dispatcher {
     return null;
   }
 
-  createAsync(plugin:ZLUX.Plugin, action:Action, eventContext: any):Promise<ApplicationInstanceWrapper>{
+  private createAsync(plugin:ZLUX.Plugin, action:Action, eventContext: any):Promise<ActionTarget>{
     //let appPromise:Promise<MVDHosting.InstanceId>
     if (!this.launchCallback){
       return Promise.reject("no launch callback established");
     }
     let launchMetadata = this.buildObjectFromTemplate(action.primaryArgument, eventContext);
+    if (this.postMessageCallback && plugin.getWebContent().framework === 'iframe') {
+      let contexts = this.pendingIframes.get(plugin.getIdentifier());
+      if (!contexts) {
+        contexts = [];
+        this.pendingIframes.set(plugin.getIdentifier(), contexts);
+      }
+      contexts.push(new IframeContext(Date.now()+IFRAME_LOAD_TIMEOUT, launchMetadata));
+      setTimeout(()=> {
+        if (contexts) {
+          let now = Date.now();
+          for (let i = 0; i < contexts.length; i++) {
+            if (contexts[i].timestamp > now) {
+              if (i > 0) {
+                contexts.splice(0,i);
+              }
+              return;
+            }
+          }
+          //clear
+          this.pendingIframes.set(plugin.getIdentifier(),[]);
+        }
+      },IFRAME_LOAD_TIMEOUT+1);
+    }
     let appPromise = 
       this.launchCallback(plugin, launchMetadata).then( (newAppID:MVDHosting.InstanceId) => {
         let wrapper = this.getAppInstanceWrapper(plugin,newAppID);
         if (wrapper){
-          return wrapper;
+          return new ActionTarget(wrapper,false);
         } else {
           return Promise.reject("could not find wrapper after launch/create for "+plugin.getIdentifier());
         }
@@ -412,7 +517,7 @@ export class Dispatcher implements ZLUX.Dispatcher {
     return appPromise;
   }
 
-  getActionTarget(action:Action, eventContext: any):Promise<ApplicationInstanceWrapper>{
+  private getActionTarget(action:Action, eventContext: any):Promise<ActionTarget>{
     let plugin:ZLUX.Plugin|undefined = ZoweZLUX.pluginManager.getPlugin(action.targetPluginID);
     let applicationInstanceId:MVDHosting.InstanceId|undefined = eventContext.applicationInstanceId;
     if (plugin){
@@ -423,7 +528,7 @@ export class Dispatcher implements ZLUX.Dispatcher {
         case ActionTargetMode.PluginFindAnyOrCreate:
           let wrappers:ApplicationInstanceWrapper[]|undefined = this.instancesForTypes.get(plugin.getKey());
           if (wrappers && wrappers.length > 0) {
-            return Promise.resolve(wrappers[0]);
+            return Promise.resolve(new ActionTarget(wrappers[0], true));
           } else {
             return this.createAsync(plugin,action,eventContext);
           }
@@ -433,7 +538,7 @@ export class Dispatcher implements ZLUX.Dispatcher {
             existingWrapper = this.getAppInstanceWrapper(plugin,applicationInstanceId);
           }
           if (existingWrapper){
-            return Promise.resolve(existingWrapper);
+            return Promise.resolve(new ActionTarget(existingWrapper, true));
           } else {
             return this.createAsync(plugin, action, eventContext);
           }
@@ -449,15 +554,24 @@ export class Dispatcher implements ZLUX.Dispatcher {
 
   invokeAction(action:Action, eventContext: any):any{
     this.log.info("dispatcher.invokeAction on context "+JSON.stringify(eventContext));
-    this.getActionTarget(action,eventContext).then( (wrapper:ApplicationInstanceWrapper) => {
+    this.getActionTarget(action,eventContext).then( (target: ActionTarget) => {
+      const wrapper = target.wrapper;
       switch (action.type) {
       case ActionType.Launch:
-        this.log.debug("invoke Launch, which means do nothing if wrapper found: "+wrapper);
-        break;
+        if (!target.preexisting) {
+          this.log.debug("invoke Launch, which means do nothing if wrapper found: "+wrapper);
+          break;
+        } //else fall-through
       case ActionType.Message:
         this.log.debug('Invoking message type Action');
+        //TODO is eventContext here different from this.buildObjectFromTemplate(action.primaryArgument, eventContext);
         if (wrapper.callbacks && wrapper.callbacks.onMessage) {
           wrapper.callbacks.onMessage(eventContext);
+        } else if (this.postMessageCallback && wrapper.isIframe) {
+          this.postMessageCallback(wrapper.applicationInstanceId,
+                                   { dispatchType: 'message',
+                                     dispatchData: eventContext
+                                   });
         }
         break;
       case ActionType.Minimize:
@@ -575,7 +689,7 @@ export enum ActionType {       // not all actions are meaningful for all target 
   Maximize,
   Close,                       // may need to call a "close handler"
 } 
-
+  
 
 export class Action implements ZLUX.Action {
     id: string;           // id of action itself.

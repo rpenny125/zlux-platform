@@ -39,12 +39,15 @@ declare namespace MVDHosting {
   export interface DesktopPluginDefinition extends ZLUX.ContainerPluginDefinition {
     getIdentifier(): string;
     getFramework(): string;
+    getCopyright(): string;
+    hasComponents(): boolean;
   }
 
   export interface ViewportManagerInterface {
-    createViewport(providers: Map<string, any>): MVDHosting.ViewportId;
+    createViewport(providersProvider: any): MVDHosting.ViewportId;
     registerViewport(viewportId: MVDHosting.ViewportId, instanceId: MVDHosting.InstanceId): void;
-    destroyViewport(viewportId: MVDHosting.ViewportId): void;
+    destroyViewport(viewportId: MVDHosting.ViewportId): Promise<void>;
+    registerViewportCloseHandler(viewportId: MVDHosting.InstanceId, watcher: () => Promise<any>): void;
     getApplicationInstanceId(viewportId: MVDHosting.ViewportId): MVDHosting.InstanceId | null;
   }
 
@@ -55,8 +58,10 @@ declare namespace MVDHosting {
     setEmbeddedInstanceInput(embeddedInstance: MVDHosting.EmbeddedInstance, input: string, value: any): void;
     getEmbeddedInstanceOutput(embeddedInstance: MVDHosting.EmbeddedInstance, output: string): Observable<any>|undefined;
     killApplication(plugin:ZLUX.Plugin, appId:MVDHosting.InstanceId):void;
-    showApplicationWindow(plugin: DesktopPluginDefinition): void;
+    showApplicationWindow(plugin: DesktopPluginDefinition): Promise<MVDHosting.InstanceId>;
+//must be same exact pointer, otherwise return = false, not found.
     isApplicationRunning(plugin: DesktopPluginDefinition): boolean;
+    getViewportComponentRef(viewportId: MVDHosting.ViewportId): ComponentRef<any> | null;
   }
 
   export interface PluginManagerInterface {

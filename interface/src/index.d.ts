@@ -24,7 +24,10 @@ declare namespace ZLUX {
      * This is the interface that is called by the window manager or app manager to tell the
      * dispatcher about an application (i.e. plugin instance).
      */
-    registerPluginInstance(plugin: Plugin, applicationInstanceId: any, isIframe: boolean): void;
+    registerPluginWatcher(plugin:ZLUX.Plugin, watcher: PluginWatcher): void;
+    //only removes watcher when same exact object
+    deregisterPluginWatcher(plugin:ZLUX.Plugin, watcher: PluginWatcher): boolean; 
+    registerPluginInstance(plugin: Plugin, applicationInstanceId: any, isIframe: boolean, isEmbedded?:boolean): void;
     deregisterPluginInstance(plugin: Plugin, applicationInstanceId: any): void;
     setLaunchHandler(launchCallback: any): void;
     setPostMessageHandler(postMessageCallback: any): void;
@@ -36,6 +39,8 @@ declare namespace ZLUX {
     invokeAction(action: Action, eventContext: any): any;
     makeAction(id: string, defaultName: string, targetMode: ActionTargetMode, type: ActionType, targetPluginID: string, primaryArgument: any): Action;
     registerApplicationCallbacks(plugin: Plugin, applicationInstanceId: any, callbacks: ApplicationCallbacks): void;
+    clear(): void;
+    iframeLoaded(instanceId: MVDHosting.InstanceId, identifier: string);
     constants: DispatcherConstants;
   }
 
@@ -96,16 +101,32 @@ declare namespace ZLUX {
   }
 
   interface ComponentLogger {
-    log(minimumLevel: number, message: string): void;
-    info(message: string): void;
-    warn(message: string): void;
-    debug(message: string): void;
+    log(minimumLevel: number, ...loggableItems:any[]): void;
+    info(...loggableItems:any[]): void;
+    warn(...loggableItems:any[]): void;
+    severe(...loggableItems:any[]): void;    
+    debug(...loggableItems:any[]): void;
     makeSublogger(componentNameSuffix: string): ComponentLogger;
   }
 
   interface Logger {
     makeComponentLogger(componentName: string): ComponentLogger;
     setLogLevelForComponentName(componentName: string, level: number): void;
+  }
+
+  interface Globalization {
+    getLanguage(): string;
+    getLocale(): string;
+  }
+
+  type UnixFileUriOptions = {
+    sourceEncoding?: string,
+    targetEncoding?: string,
+    newName?: string,
+    forceOverwrite?: boolean,
+    sessionID?: number,
+    lastChunk?: boolean,
+    responseType?: string
   }
 
   /**
@@ -118,8 +139,15 @@ declare namespace ZLUX {
     datasetMetadataUri(dsn: string, detail?: string, types?: string, listMembers?: boolean, workAreaSize?: number, includeMigrated?: boolean, includeUnprintable?: boolean, resumeName?: string, resumeCatalogName?: string): string;
     datasetContentsUri(dsn: string): string;
     VSAMdatasetContentsUri(dsn: string, closeAfter?: boolean): string;
-    unixFileMetadataUri(path: string): string;
-    unixFileContentsUri(path: string): string;
+    /*TODO: for breaking change, we need to change this into a passed object so that its way cleaner and
+            more clear as to what is going on
+    */
+    unixFileUri(route: string, absPath: string,
+                sourceEncodingOrOptions?: string | UnixFileUriOptions | undefined,
+                targetEncoding?: string | undefined, newName?: string | undefined,
+                forceOverwrite?: boolean | undefined, sessionID?: number | undefined, 
+                 lastChunk?: boolean | undefined, responseType?: string): string;
+    omvsSegmentUri(): string;
     rasUri(uri: string): string;
     serverRootUri(uri: string): string;
     pluginResourceUri(pluginDefinition: Plugin, relativePath: string): string;
@@ -127,17 +155,27 @@ declare namespace ZLUX {
     pluginConfigForScopeUri(pluginDefinition: ZLUX.Plugin, scope: string, resourcePath: string, resourceName?: string): string;
     /**
        Returns a URI for accessing a resource for a particular user. NOTE: This command should be gated by authorization that restricts it to administrative use.
+       Temporarily removed until authorization checks are in place
        @function
      */
-    pluginConfigForUserUri(pluginDefinition: ZLUX.Plugin, user: string, resourcePath: string, resourceName?: string): string;
+    //pluginConfigForUserUri(pluginDefinition: ZLUX.Plugin, user: string, resourcePath: string, resourceName?: string): string;
     /**
        Returns a URI for accessing a resource for a particular group. NOTE: This command should be gated by authorization that restricts it to administrative use.
+       Temporarily removed until authorization checks are in place
        @function
      */
-    pluginConfigForGroupUri(pluginDefinition: ZLUX.Plugin, group: string, resourcePath: string, resourceName?: string): string;
+    //pluginConfigForGroupUri(pluginDefinition: ZLUX.Plugin, group: string, resourcePath: string, resourceName?: string): string;
     pluginConfigUri(pluginDefinition: ZLUX.Plugin, resourcePath: string, resourceName?: string): string;
-    pluginWSUri(pluginDefinition: Plugin, serviceName: string, relativePath: string): string;
-    pluginRESTUri(pluginDefinition: Plugin, serviceName: string, relativePath: string): string;
+    pluginWSUri(pluginDefinition: Plugin, serviceName: string, 
+        relativePath: string, version?: string): string;
+    pluginRESTUri(pluginDefinition: Plugin, serviceName: string, 
+        relativePath: string, version?: string): string;
+  }
+
+  
+  interface PluginWatcher {
+    instanceAdded(instanceId: MVDHosting.InstanceId, isEmbedded: boolean|undefined): void;
+    instanceRemoved(instanceId: MVDHosting.InstanceId): void;
   }
 
   const enum PluginType {
@@ -151,6 +189,8 @@ declare namespace ZLUX {
     getVersion():string;
     getWebContent():any;
     getType():PluginType;
+    getCopyright(): string;
+    hasComponents(): boolean;
   }
 
   interface ContainerPluginDefinition {
@@ -677,6 +717,7 @@ declare class ZoweZLUXResources {
   static registry: ZLUX.Registry;
   //previously was NotificationManager
   static notificationManager: any;
+  static globalization: ZLUX.Globalization;
 }
 
 /*

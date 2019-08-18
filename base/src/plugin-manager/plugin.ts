@@ -28,6 +28,7 @@ export abstract class Plugin implements ZLUX.Plugin {
   abstract readonly version: string;
   abstract readonly type: ZLUX.PluginType;
   abstract readonly webContent: any;
+  abstract readonly copyright: string;
 
   static parsePluginDefinition(definition: any): Plugin {
     const apiVersion = new SemanticVersion(definition.apiVersion);
@@ -51,7 +52,11 @@ export abstract class Plugin implements ZLUX.Plugin {
   abstract getWebContent():any;
 
   abstract getType():ZLUX.PluginType;
- 
+  
+  abstract getCopyright():string;
+
+  abstract hasComponents(): boolean;
+
   public toString():string {
     return "<ZLUX.plugin "+this.getKey()+">";
   }
@@ -63,6 +68,8 @@ class Plugin_0 extends Plugin {
   readonly type: ZLUX.PluginType;
   readonly webContent: any;
   readonly key:string;
+  readonly copyright:string;
+  readonly _hasComponents: boolean;
 
   constructor(definition: any) {
     super()
@@ -93,6 +100,18 @@ class Plugin_0 extends Plugin {
     this.key = definition.identifier + '@' + definition.pluginVersion;
 
     this.webContent = definition.webContent;
+
+    if(this.webContent) {
+      if('hasComponents' in this.webContent) {
+        this._hasComponents = this.webContent.hasComponents;
+      } else {
+        this._hasComponents = false;
+      }
+    }
+    
+    if (typeof definition.copyright === "string") {
+      this.copyright = definition.copyright;
+    } 
   }
 
   getIdentifier():string{
@@ -113,6 +132,14 @@ class Plugin_0 extends Plugin {
 
   getType():ZLUX.PluginType{
     return this.type;
+  }
+
+  getCopyright():string{
+    return this.copyright==null?'':this.copyright;
+  }
+
+  hasComponents(): boolean {
+    return this._hasComponents;
   }
 
 }
